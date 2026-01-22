@@ -23,6 +23,7 @@ struct __qmap_base__
 	void          *__cache_array;
 	__qmap_d__    *__data;
 	__qmap_base__ *__np;
+	size_t        __capacity;
 	size_t        __size;
 } __attribute__((align, 64));
 
@@ -35,7 +36,7 @@ struct __qmap_d__
 };
 
 #define qmap_prefetch(adr, ...) __builtin_prefetch(adr, __VA_ARGS__)
-#define qmap_expected(cond, exp_val) __builtin_expected(cond, exp_val)
+#define qmap_expect(cond, exp_val) __builtin_expect(cond, exp_val)
 #define QMAP_UNUSED __attribute__((maybe_unused))
 #define QMAP_PROBE_MAX (1 << 16) // number of probes before rehashing
 
@@ -126,6 +127,7 @@ extern __inline__ __attribute__((always_inline, pure)) uint64_t qmap_b64_testeq(
 #define qmap_private_cache_array__(map_object, at) ((map_object)->__cache_array + at)
 #define qmap_private_data__(map_object, at) ((map_object)->__data + at)
 #define qmap_private_ctrl_switch__(map_object, at) ((map_object)->__ctrl_switch)
+#define qmap_private_capacity__(map_object) ((map_object)->__capacity)
 #define qmap_private_size__(map_object) ((map_object)->__size)
 
 #define qmap_read_next_group(cache, tag)				\
@@ -147,9 +149,26 @@ static __inline__ __attribute__((always_inline, pure)) uint32_t qmap_compute_has
 
 __attribute__((noinline, warn_unused)) static struct __qmap_base__ *qmap_init__(void)
 {
-	struct __qmap_base__ *object;
-
+	struct __qmap_base__ *object = qmap_calloc(1, sizeof(__qmap_base__));
 	return object;
+}
+
+__attribute__((nonnull)) void qmap_reserve__(__qmap_base__ *object, size_t size)
+{
+	size_t capsize;
+
+	if (size == 0)
+		return;
+	if (qmap_private_capacity__(object) != 0)
+		{
+			// error
+			return;
+		}
+	capsize = qmap_rndmul_up(size, QMAP_RDWORD);
+	qmap_private_cache_array__(object, 0) = qmap_calloc(1, capsize + (capsize >> 6));
+	qmap_private_ctrl_switch__(object, 0) = (uint8_t *)qmap_private_cache_array__(object) + capsize;
+	qmap_private_data__(object, 0)  = qmap_calloc(capsize, sizeof(__qmap_d__));
+	qmap_private_capacity__(object) = capsize;	
 }
 
 /*
@@ -161,7 +180,7 @@ static __attribute__((nonnull)) void *qmap_find__(const struct __qmap_base__ con
 	qmap_data_t *data_group_ry, group QMAP_UNUSED;
 	mask_t   mask   = 0;
 	uint32_t hash   = qmap_compute_hash(key, key_len);
-	uint32_t where  = (hash & (__qmap_private_size__(object) - 1));
+	uint32_t where  = (hash & (qmap_private_capacity__(object) - 1));
 	_Alignas(QMAP_RDWORD) const intx8_t mulx8_hash = qmap_mm_broadcast_byte__(qmap_cached_index(hash));
 
 	if (0)
@@ -171,14 +190,14 @@ static __attribute__((nonnull)) void *qmap_find__(const struct __qmap_base__ con
 		}
 
 	where = qmap_rndmul_down(where, QMAP_RDWORD_BF);
-	cache_group_ry = __qmap_private_cache__(object, where); // read some bytes from cache array before actual index
-	data_group_ry = __qmap_private_data__(object, where);
+	cache_group_ry = qmap_private_cache__(object, where); // read some bytes from cache array before actual index
+	data_group_ry = qmap_private_data__(object, where);
 
 	qmap_prefetch(cache_array);
-	for (uint32_t i = (qmap_rndmul_up(__qmap_private_size__(object), QMAP_RDWORD) - where) >> QMAP_RDWORD_P2; i--;)
+	for (uint32_t i = (qmap_rndmul_up(qmap_private_size__(object), QMAP_RDWORD) - where) >> QMAP_RDWORD_P2; i--;)
 		{
 			mask = qmap_mm_test_eq__(cache_array, mulx8_hash);
-			while (qmap_expected(mask, 0))
+			while (qmap_expect(mask, 0))
 				{
 					where = qmap_scan_reverse(mask) >> QMAP_MASK_SHFT;
 					group = data_group_ry[where];
@@ -191,20 +210,15 @@ static __attribute__((nonnull)) void *qmap_find__(const struct __qmap_base__ con
 	return NULL;
 }
 
-static uint32_t qmap_get_unused__(uint64_t *switch_ctrl, uint32_t *from)
+static uint32_t qmap_get_unused__(uint64_t *ctrl_switch, size_t size, uint32_t *from)
 {
-	uint32_t __from = qmap_rndmul_up(*from, QMAP_RDWORD_BF);
+	size_t index = qmap_rndmul_up(*from, QMAP_RDWORD_BF), i;
+  
+	for (ctrl_switch += (index >> 6), i = index = (qmap_rndmul_up(size) - index); i; i--, ctrl_switch++)
+		if (qmap_expect(*ctrl_switch ^ 0xffffffffffffffffull, 1))
+			return (64ull * (index - i)) | qmap_scan_reverse(*ctrl_switch);
 
-	// TODO: finish this later
-	switch_ctrl += __from >> 8;
-
-	for (uint32_t i = 0; i < PROBE_MAX >> 8; i++)
-		{
-			if (__builtin_expect(switch_ctrl[i] ^ 0xffffffffffffffffull, 1))
-				return __scan_reverse(switch_ctrl[i]);
-		}
-
-	return __from;
+	return -1;
 }
 
 static __attribute__((nonnull)) void qmap_add__(struct __qmap_base__ *object, const void *__restrict key, const void *__restrict value)

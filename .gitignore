@@ -39,3 +39,10 @@
 
 # debug information files
 *.dwo
+
+# Backup
+*#
+*~
+
+# Temporary files
+test/Backup

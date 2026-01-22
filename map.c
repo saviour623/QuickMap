@@ -216,7 +216,7 @@ static uint32_t qmap_get_unused__(uint64_t *ctrl_switch, size_t size, uint32_t *
   
 	for (ctrl_switch += (index >> 6), i = index = (qmap_rndmul_up(size) - index); i; i--, ctrl_switch++)
 		if (qmap_expect(*ctrl_switch ^ 0xffffffffffffffffull, 1))
-			return (64ull * (index - i)) | qmap_scan_reverse(*ctrl_switch);
+			return ( *from = (64ull * (index - i)) | qmap_scan_reverse(*ctrl_switch) );
 
 	return -1;
 }

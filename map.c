@@ -25,6 +25,8 @@ struct __qmap_base__
 	__qmap_base__ *__np;
 	size_t        __capacity;
 	size_t        __size;
+	size_t        __ldf;
+	uint16_t      __rehash_size;
 } __attribute__((align, 64));
 
 struct __qmap_d__
@@ -38,6 +40,7 @@ struct __qmap_d__
 #define qmap_prefetch(adr, ...) __builtin_prefetch(adr, __VA_ARGS__)
 #define qmap_expect(cond, exp_val) __builtin_expect(cond, exp_val)
 #define QMAP_UNUSED __attribute__((maybe_unused))
+#define QMAP_DEFAULT_SIZE 32
 #define QMAP_PROBE_MAX (1 << 16) // number of probes before rehashing
 
 #if QMAP_INCLUDE_HASH
@@ -130,11 +133,20 @@ extern __inline__ __attribute__((always_inline, pure)) uint64_t qmap_b64_testeq(
 #define qmap_private_capacity__(map_object) ((map_object)->__capacity)
 #define qmap_private_size__(map_object) ((map_object)->__size)
 
-#define qmap_read_next_group(cache, tag)				\
-	do {										\
-		++(cache);								\
-		tag = tag + QMAP_RDWORD;				\
-	} while(0)
+extern __inline__ __attribute__((always_inline))  void qmap_private_set_structure__(__qmap_base__ *map, const size_t i, const void *k, const void *v, const uint32_t h)
+{
+	qmap_data_t _map_d = qmap_private_data__(map, i);
+
+	_map_d->key   = k, _map_d->value = v;
+#ifdef QMAP_INCLUDE_HASH
+	_map_d->hash  = h;
+#endif
+	qmap_private_cache_array__(map, i)[0] = qmap_cached_index(h);
+	qmap_private_size__(map) += 1;
+}
+
+#define qmap_read_next_group(cache_array, data_array)		\
+	do { ++(cache_array); data_array += QMAP_RDWORD; } while(0)
 
 extern __inline__ __attribute__((always_inline, pure)) uint8_t qmap_cached_index(const uintmax_t hash)
 {
@@ -168,7 +180,8 @@ __attribute__((nonnull)) void qmap_reserve__(__qmap_base__ *object, size_t size)
 	qmap_private_cache_array__(object, 0) = qmap_calloc(1, capsize + (capsize >> 6));
 	qmap_private_ctrl_switch__(object, 0) = (uint8_t *)qmap_private_cache_array__(object) + capsize;
 	qmap_private_data__(object, 0)  = qmap_calloc(capsize, sizeof(__qmap_d__));
-	qmap_private_capacity__(object) = capsize;	
+	qmap_private_capacity__(object)  = capsize;
+	qmap_private_load_factor(object) = (capsize * 0.875) + 0.5;
 }
 
 /*
@@ -210,26 +223,49 @@ static __attribute__((nonnull)) void *qmap_find__(const struct __qmap_base__ con
 	return NULL;
 }
 
-static uint32_t qmap_get_unused__(uint64_t *ctrl_switch, size_t size, uint32_t *from)
+static int qmap_get_unused__(uint64_t *ctrl_switch, size_t size, uint32_t *from)
 {
-	size_t index = qmap_rndmul_up(*from, QMAP_RDWORD_BF), i;
+	size_t index = qmap_rndmul_down(*from, QMAP_RDWORD_BF), i;
   
-	for (ctrl_switch += (index >> 6), i = index = (qmap_rndmul_up(size) - index); i; i--, ctrl_switch++)
+	for (ctrl_switch += (index >> 6), i = index = (qmap_rndmul_up(size) - index) >> 6; i; i--, ctrl_switch++)
 		if (qmap_expect(*ctrl_switch ^ 0xffffffffffffffffull, 1))
-			return ( *from = (64ull * (index - i)) | qmap_scan_reverse(*ctrl_switch) );
+			{
+				const uint64_t qsr = qmap_scan_reverse(*ctrl_switch);  
+				*ctrl_switch |= (1ull << qsr);
+				*from = (64ull * (index - i)) | qsr;
+				return 0;
+			}
 
 	return -1;
 }
 
+extern __inline__ __attribute__((always_inline)) qmap_ctrl_is_empty(const uint64_t *ctrl_switch, const size_t i)
+{
+	return ctrl_switch[i >> 6] & (1 << (i & 63));
+}
+
 static __attribute__((nonnull)) void qmap_add__(struct __qmap_base__ *object, const void *__restrict key, const void *__restrict value)
 {
-	uint32_t where = __hash__(key, strlen(key)) & (__size__(object) - 1); // object data capacity is a maximum of 256 items
+	void *ctrl_switch;
+	uint32_t where QMAP_UNUSED, hash QMAP_UNUSED;
 
-	if (__null__(__meta__(object), where) && __get_unused__(__meta__(object), &where))
+	if (qmap_empty_object(object))
+		qmap_reserve(object, QMAP_DEFAULT_SIZE);
+
+		if (qmap_expect(qmap_private_size__(object) > qmap_private_ldf_size__(object), 0))
+		goto rehash;
+
+	hash  = qmap_compute_hash(key, strlen(key));
+	where = hash & (qmap_private_size__(object) - 1);
+	ctrl_switch = qmap_private_ctrl_switch__(object, 0);
+
+	if (!qmap_ctrl_is_empty(ctrl_switch, where) && qmap_get_unused__(ctrl_switch, &where) < 0)
 		{
+		rehash:
 			// resize object
+			return;
 		}
-
+	qmap_private_set_structure__(object, where, key, value, hash);
 }
 
 static __attribute__((nonnull)) void qmap_remove__(struct __qmap_base__ *object, const void *__restrict key)

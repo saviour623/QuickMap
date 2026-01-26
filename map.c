@@ -138,11 +138,11 @@ extern __inline__ __attribute__((always_inline, pure)) uint64_t qmap_b64_testeq(
 #endif
 
 #define qmap_private_cache_array__(map_object, at) (&((map_object)->__cache_array))[at]
-#define qmap_private_data__(map_object, at) (&((map_object)->__data))[at]
+#define qmap_private_data__(map_object, at)        (&((map_object)->__data))[at]
 #define qmap_private_ctrl_switch__(map_object, at) (&((map_object)->__ctrl_switch))[at]
-#define qmap_private_capacity__(map_object) ((map_object)->__capacity)
-#define qmap_private_size__(map_object) ((map_object)->__size)
-#define qmap_private_load_factor__(map_object) ((map_object)->__ldf)
+#define qmap_private_capacity__(map_object)        ((map_object)->__capacity)
+#define qmap_private_size__(map_object)            ((map_object)->__size)
+#define qmap_private_load_factor__(map_object)     ((map_object)->__ldf)
 extern __inline__ __attribute__((always_inline)) void qmap_private_set_structure__(__qmap_base__ *map, const size_t i, const void *k, const void *v, const uint32_t h)
 {
 	qmap_data_t _map_d = qmap_private_data__(map, i);
@@ -206,9 +206,9 @@ __attribute__((nonnull)) void qmap_reserve__(__qmap_base__ *object, size_t size)
 	capsize = qmap_rndmul_up(size, QMAP_RDWORD);
 	qmap_private_cache_array__(object, 0) = qmap_calloc(1, capsize + (capsize >> 6));
 	qmap_private_ctrl_switch__(object, 0) = (uint8_t *)qmap_private_cache_array__(object, capsize);
-	qmap_private_data__(object, 0) = qmap_calloc(capsize, sizeof(__qmap_d__));
-	qmap_private_capacity__(object) = capsize;
-	qmap_private_load_factor__(object) = (capsize * 0.875) + 0.5;
+	qmap_private_data__(object, 0)        = qmap_calloc(capsize, sizeof(__qmap_d__));
+	qmap_private_capacity__(object)       = capsize;
+	qmap_private_load_factor__(object)    = (capsize * 0.875) + 0.5;
 }
 
 /*

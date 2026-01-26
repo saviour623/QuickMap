@@ -1,5 +1,7 @@
 #include "base.h"
 #define __amd__
+#define __SSE2__ 1
+
 #if defined(x86_64) || defined(__amd__)
 #include <immintrin.h>
 #elif defined(__arm__) || defined(__ARM_ARCH) && __ARM_ARCH >= 7
@@ -15,7 +17,6 @@
 #include <windef.h>
 #endif
 
-#define __AVX256__
 typedef struct __qmap_base__ __qmap_base__, *Qmap;
 typedef struct __qmap_d__ __qmap_d__, *qmap_data_t;
 
@@ -29,7 +30,7 @@ struct __qmap_base__
 	size_t __size;
 	size_t __ldf;
 	uint16_t __rehash_size;
-};
+} __attribute__((aligned(64)));
 
 struct __qmap_d__
 {
@@ -86,7 +87,7 @@ typedef uint32_t mask_t;
 #define qmap_mm_set_zero__() _mm256_setzero_si256()
 #define qmap_mm_test_eq__(v, x) _mm256_movemask_epi8(_mm256_cmpeq_epi8(_mm256_loadu_si128((const __m256i *)(v)), (x)))
 
-#elif __SSE2__
+#elif defined(__SSE2__)
 typedef __m128i intx8_t;
 typedef uint16_t mask_t;
 #define QMAP_RDWORD 16
@@ -97,7 +98,7 @@ typedef uint16_t mask_t;
 #define qmap_mm_set_zero__() _mm_setzero_si128();
 #define qmap_mm_test_eq__(v, x) _mm_movemask_epi8(_mm_cmpeq_epi8(_mm_load_si128((const __m128i *)(v)), (x)))
 
-#elif __ARM_NEON
+#elif defined(__ARM_NEON)
 typedef uint64_t intx8_t;
 typedef int8x8_t mask_t;
 static uint64_t qmap_neon_testeq(const uint8x8_t, const uint8x8_t);
@@ -114,7 +115,7 @@ extern __inline__ __attribute__((always_inline, pure)) uint64_t qmap_neon_testeq
 #define qmap_mm_set_zero__() qmap_mm_broadcast_byte__(0)
 #define qmap_mm_test_eq__(v, x) qmap_neon_testeq(vld1_u8((void *)*(v)), x)
 
-#elif __UINT64__
+#elif defined(__UINT64__)
 typedef uint64_t intx8_t, mask_t;
 static uint64_t qmap_b64_testeq(uint64_t, const uint64_t);
 #define QMAP_RDWORD 8
@@ -137,11 +138,11 @@ extern __inline__ __attribute__((always_inline, pure)) uint64_t qmap_b64_testeq(
 #endif
 
 #define qmap_private_cache_array__(map_object, at) (&((map_object)->__cache_array))[at]
-#define qmap_private_data__(map_object, at)        (&((map_object)->__data))[at]
+#define qmap_private_data__(map_object, at) (&((map_object)->__data))[at]
 #define qmap_private_ctrl_switch__(map_object, at) (&((map_object)->__ctrl_switch))[at]
-#define qmap_private_capacity__(map_object)        ((map_object)->__capacity)
-#define qmap_private_size__(map_object)            ((map_object)->__size)
-#define qmap_private_load_factor__(map_object)     ((map_object)->__ldf)
+#define qmap_private_capacity__(map_object) ((map_object)->__capacity)
+#define qmap_private_size__(map_object) ((map_object)->__size)
+#define qmap_private_load_factor__(map_object) ((map_object)->__ldf)
 extern __inline__ __attribute__((always_inline)) void qmap_private_set_structure__(__qmap_base__ *map, const size_t i, const void *k, const void *v, const uint32_t h)
 {
 	qmap_data_t _map_d = qmap_private_data__(map, i);
@@ -232,15 +233,15 @@ static __attribute__((nonnull)) size_t qmap_find__(const struct __qmap_base__ co
 	cache_group_ry = qmap_private_cache__(object, where); // read some bytes from cache array before actual index
 	data_group_ry = qmap_private_data__(object, where);
 
-	qmap_prefetch(cache_array);
+	qmap_prefetch(cache_group_ry, 0, 3);
 	for (uint32_t i = (qmap_rndmul_up(qmap_private_size__(object), QMAP_RDWORD) - where) >> QMAP_RDWORD_P2; i--;)
 	{
-		mask = qmap_mm_test_eq__(cache_array, mulx8_hash);
+		mask = qmap_mm_test_eq__(cache_group_ry, mulx8_hash);
 		while (qmap_expect(mask, 0))
 		{
 			where = qmap_scan_reverse(mask) >> QMAP_MASK_SHFT;
 			group = data_group_ry[where];
-			if (qmap_compare_hash(group.hash, hash) && qmap_cmp_str_eq(group.key, key, key_len))
+			if (qmap_compare_hash(group.hash, hash) && qmap_cmp_str_eq(group->__key, key, key_len))
 				return where;
 			mask &= mask - 1;
 		}
@@ -249,7 +250,7 @@ static __attribute__((nonnull)) size_t qmap_find__(const struct __qmap_base__ co
 	return NULL;
 }
 
-#define QMAP_USMALL_SPACE
+#ifdef QMAP_USMALL_SPACE
 static int qmap_get_unused__(uint8_t *cache_array, size_t size, uint32_t *from)
 {
 	size_t index = qmap_rndmul_down(*from, QMAP_RDWORD_BF);
@@ -268,7 +269,6 @@ static int qmap_get_unused__(uint8_t *cache_array, size_t size, uint32_t *from)
 }
 #define qmap_get_unused(map_object, at) qmap_get_unused__(qmap_private_cache_array__(map_object), qmap_private_size__(map_object), at)
 #define qmap_ctrl_is_empty(map_object) (qmap_private_cache_array__(map_object, at)[0] == 0)
-
 #else
 static int qmap_get_unused__(uint64_t *ctrl_switch, size_t size, uint32_t *from)
 {
@@ -280,15 +280,13 @@ static int qmap_get_unused__(uint64_t *ctrl_switch, size_t size, uint32_t *from)
 		{
 			const uint64_t qsr = qmap_scan_reverse(*ctrl_switch);
 			*ctrl_switch |= (1ull << qsr);
-			return (*from = (i << 8) | qsr)
+			return (*from = (i << 8) | qsr);
 		}
 
 	return -1;
 }
-
-#define qmap_get_unused(map_object, at) qmap_get_unused__(qmap_private_ctrl_switch__(map_object), qmap_private_size__(map_object), at)
-#define qmap_ctrl_is_empty(map_object) (qmap_private_ctrl_switch__(map_object, (at) >> 6)[0] & (1ull << ((at) & 63u)))
-
+#define qmap_get_unused(map_object, at) qmap_get_unused__(qmap_private_ctrl_switch__(map_object, 0), qmap_private_size__(map_object), at)
+#define qmap_ctrl_is_empty(map_object, at) qmap_private_ctrl_switch__(map_object, at >> 6) & (1ull << ((at) & 63u))
 #endif
 
 static __attribute__((nonnull)) void qmap_add__(struct __qmap_base__ *object, const void *__restrict key, const void *__restrict value)

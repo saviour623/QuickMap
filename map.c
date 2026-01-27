@@ -41,6 +41,14 @@ struct __qmap_kwvh__
 #endif
 };
 
+typedef struct {
+	uintmax_t (*__hash_func)(void *key, size_t key_len, uint16_t seed);
+	void *    (*__new)(size_t n, size_t size);
+	void      (*__delete)(void *ptr);
+	void      (*__kwvh_delete)(void *ptr);
+	uint16_t   *__seed;
+} qmap_policy_t;
+
 #define qmap_prefetch(adr, ...) __builtin_prefetch(adr, __VA_ARGS__)
 #define qmap_expect(cond, exp_val) __builtin_expect(cond, exp_val)
 #define QMAP_UNUSED __attribute__((unused))
@@ -48,12 +56,12 @@ struct __qmap_kwvh__
 #define QMAP_NULL 0
 
 #if QMAP_INCLUDE_HASH
-#define qmap_compare_hash(hash_1, hash_2) NOT((hash_1) ^ (hash_2))
+#define qmap_compare_hash(_1, _2) !((_1) ^ (_2))
 #else
-#define qmap_compare_hash(...) 0
+#define qmap_compare_hash(...) (1)
 #endif
 
-#if (__MINGW64__) || defined(__clang__) || defined(__GCC__)
+#if defined(__MINGW64__) || defined(__clang__) || defined(__GCC__)
 #define qmap_scan_reverse(mask) __builtin_ctzll(mask)
 #elif defined(WINSYS)
 #ifdef _bit_scan_reverse
@@ -72,9 +80,9 @@ extern __inline__ __forceinline uint64_t qmap_scan_reverse(const uint64_t mask)
 #define qmap_rndmul_up(n, p2) (((n) + ((p2) - 1)) & ~((p2) - 1))
 
 #if defined(__HAVE_SIMD_STRCMP__)
-#define qmap_cmp_str_eq(str1, str2, len_str1) NOT(_mm_cmpistrc(_mm_loadu_si128(str1), _mm_loadu_si128(str2), 0))
+#define qmap_cmp_str_eq(str1, str2, len_str1) !(_mm_cmpistrc(_mm_loadu_si128(str1), _mm_loadu_si128(str2), 0))
 #else
-#define qmap_cmp_str_eq(str1, str2, len_str1) NOT(memcmp(str1, str2, len_str1))
+#define qmap_cmp_str_eq(str1, str2, len_str1) !(memcmp(str1, str2, len_str1))
 #endif
 
 #ifdef __AVX256__
@@ -82,7 +90,6 @@ typedef __m256i intx8_t;
 typedef uint32_t mask_t;
 #define QMAP_RDWORD 32
 #define QMAP_RDWORD_P2 5
-#define QMAP_RDWORD_BF 128
 #define QMAP_MASK_SHFT 0
 #define qmap_mm_broadcast_byte__(x) _mm256_set1_epi8((uint8_t)(x))
 #define qmap_mm_set_zero__() _mm256_setzero_si256()
@@ -93,7 +100,6 @@ typedef __m128i intx8_t;
 typedef uint16_t mask_t;
 #define QMAP_RDWORD 16
 #define QMAP_RDWORD_P2 4
-#define QMAP_RDWORD_BF 128
 #define QMAP_MASK_SHFT 0
 #define qmap_mm_broadcast_byte__(x) _mm_set1_epi8((uint8_t)(x))
 #define qmap_mm_set_zero__() _mm_setzero_si128();
@@ -104,7 +110,6 @@ typedef uint8x8_t intx8_t;
 typedef uint64_t  mask_t;
 #define QMAP_RDWORD 8
 #define QMAP_RDWORD_P2 3
-#define QMAP_RDWORD_BF 64
 #define QMAP_MASK_SHFT 3
 static uint64_t qmap_neon_testeq(const uint8x8_t, const uint8x8_t);
 extern __inline__ __attribute__((always_inline, pure)) uint64_t qmap_neon_testeq(const uint8x8_t fv, const uint8x8_t mask)
@@ -113,18 +118,16 @@ extern __inline__ __attribute__((always_inline, pure)) uint64_t qmap_neon_testeq
 }
 #define qmap_mm_broadcast_byte__(x) vdup_n_u8((uint8_t)(x))
 #define qmap_mm_set_zero__() qmap_mm_broadcast_byte__(0)
-#define qmap_mm_test_eq__(v, x) qmap_neon_testeq(vld1_u8((void *)*(v)), x)
+#define qmap_mm_test_eq__(v, x) qmap_neon_testeq(vld1_u8(v), x)
 
 #elif defined(__UINT64__)
 typedef uint64_t intx8_t, mask_t;
-static uint64_t qmap_b64_testeq(uint64_t, const uint64_t);
 #define QMAP_RDWORD 8
 #define QMAP_RDWORD_P2 3
-#define QMAP_RDWORD_BF 64
 #define QMAP_MASK_SHFT 3
 #define test_zero_fast(v) (bool)(((v) - 0x101010101010101ull) & (~(v) & 0x8080808080808080ull))
 #define test_zero_wi(v) ((((v) - 0x1000100010001ull) | ((v) - 0x100010001000100ull)) & (~(v) & 0x8080808080808080ull));
-
+static uint64_t qmap_b64_testeq(uint64_t, const uint64_t);
 extern __inline__ __attribute__((always_inline, pure)) uint64_t qmap_b64_testeq(uint64_t fv, const uint64_t mask)
 {
 	fv ^= mask;
@@ -144,7 +147,7 @@ extern __inline__ __attribute__((always_inline, pure)) uint64_t qmap_b64_testeq(
 #define qmap__capacity__(map_object)        ((map_object)->__capacity)
 #define qmap__size__(map_object)            ((map_object)->__size)
 #define qmap__load_factor__(map_object)     ((map_object)->__load_factor)
-static __inline__ __attribute__((always_inline)) void qmap__set_structure__(__qmap_base__ *map, const size_t i, void *__restrict k, const void * __restrict v, const uint32_t h)
+static __inline__ __attribute__((always_inline)) void qmap__set_structure__(__qmap_base__ *map, size_t i, void *k, void *v, uint32_t h)
 {
 	qmap_kwvhpair_t _map_d = qmap__data__(map, i);
 
@@ -169,7 +172,7 @@ static __inline__ __attribute__((always_inline)) void qmap__set_structure__(__qm
 		++(cache_array);                        \
 	} while (0)
 
-#define qmap_get_unused(map_object, at) qmap_get_unused__(qmap__cache__(map_object), qmap__size__(map_object), at)
+#define qmap_get_unused(map_object, at) qmap_get_unused__(qmap__cache__(map_object, 0), qmap__size__(map_object), at)
 
 #define qmap_empty_object(map_object) (qmap__capacity__(map_object) == 0)
 #define qmap_ctrl_is_empty(map_object, at) (qmap__cache__(map_object, at)[0] == QMAP_NULL)
@@ -241,7 +244,7 @@ static __attribute__((nonnull)) size_t qmap_find__(const struct __qmap_base__ *o
 	size_t   where = (hash & (qmap__capacity__(object) - 1));
 	_Alignas(QMAP_RDWORD) const intx8_t mulx8_hash = qmap_mm_broadcast_byte__(qmap_cached_index(hash & 0xffffu));
 
-	where = qmap_rndmul_down(where, QMAP_RDWORD_BF);
+	where = qmap_rndmul_down(where, QMAP_RDWORD_P2);
 	cache_group_ry = qmap__cache__(object, where); // read some bytes from cache array before actual index
 	data_group_ry = qmap__data__(object, where);
 
@@ -257,14 +260,14 @@ static __attribute__((nonnull)) size_t qmap_find__(const struct __qmap_base__ *o
 				return where;
 			mask &= mask - 1;
 		}
-		qmap_read_next_qroup(cache_group_ry, data_group_ry);
+		qmap_read_next_group(cache_group_ry, data_group_ry);
 	}
-	return NULL;
+	return 0;
 }
 
 static int qmap_get_unused__(const void *cache_array, size_t size, uint32_t *from)
 {
-	size_t index = qmap_rndmul_down(*from, QMAP_RDWORD_BF);
+	size_t index = qmap_rndmul_down(*from, QMAP_RDWORD_P2);
 	mask_t mask = 0;
 	intx8_t *cache_group_ry =  (intx8_t *)(cache_array + index);
 	_Alignas(QMAP_RDWORD) const intx8_t mulx8_zero = qmap_mm_set_zero__();
@@ -279,7 +282,7 @@ static int qmap_get_unused__(const void *cache_array, size_t size, uint32_t *fro
 	return -1;
 }
 
-static __attribute__((nonnull)) void qmap_add__(struct __qmap_base__ *object, const void *__restrict key, const void *__restrict value)
+static __attribute__((nonnull)) void qmap_add__(struct __qmap_base__ *object, void *key, void *value)
 {
 	void *ctrl_switch;
 	uint32_t where QMAP_UNUSED, hash QMAP_UNUSED;
@@ -314,7 +317,7 @@ static __attribute__((nonnull)) void qmap_remove__(struct __qmap_base__ *object,
 
 static __inline__ __attribute__((nonnull, always_inline)) void *qmap_get_value(const struct __qmap_base__ *object, const void *__restrict __key)
 {
-	return qmap_find__(object, __key, 0);
+	return NULL;
 }
 
 __attribute__((noinline)) static struct __qmap_base__ *qmap_delete__(struct __qmap_base__ *object)

@@ -4,7 +4,6 @@
 #include <stdlib.h>
 #include <stddef.h>
 #include <error.h>
-
 #if defined(__x86_64__) || defined(__i386__) || defined(__amd__)
 #include <immintrin.h>
 #elif defined(__aarch64__) || defined(__arm__) || defined(__ARM_ARCH) && __ARM_ARCH >= 7
@@ -13,7 +12,7 @@
 #define __ARM_NEON 1
 #endif
 #endif
-#if defined(WIN32) || defined(_MSV_VER)
+#if defined(_WIN32) || defined(_MSV_VER)
 #define WINSYS 1
 #include <windows.h>
 #include <windef.h>
@@ -86,7 +85,7 @@ extern __inline__ __forceinline uint64_t qmap_scan_reverse(const uint64_t mask)
 #define qmap_cmp_str_eq(str1, str2, len_str1) !(memcmp(str1, str2, len_str1))
 #endif
 
-#ifdef __AVX256__
+#ifdef __AVX2__
 typedef __m256i intx8_t;
 typedef uint32_t mask_t;
 #define QMAP_RDWORD 32

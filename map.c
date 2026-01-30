@@ -173,7 +173,6 @@ static __inline__ __attribute__((always_inline)) void qmap__set_structure__(__qm
 	} while (0)
 
 #define qmap_get_unused(map_object, at) qmap_get_unused__(qmap__cache__(map_object, 0), qmap__size__(map_object), at)
-
 #define qmap_empty_object(map_object) (qmap__capacity__(map_object) == 0)
 #define qmap_ctrl_is_empty(map_object, at) (qmap__cache__(map_object, at)[0] == QMAP_NULL)
 
@@ -246,7 +245,7 @@ static __attribute__((nonnull)) size_t qmap_find__(const struct __qmap_base__ *o
 
 	where = qmap_rndmul_down(where, QMAP_RDWORD_P2);
 	cache_group_ry = qmap__cache__(object, where); // read some bytes from cache array before actual index
-	data_group_ry = qmap__data__(object, where);
+	data_group_ry  = qmap__data__(object, where);
 
 	qmap_prefetch(cache_group_ry, 0, 3);
 	for (uint32_t i = (qmap_rndmul_up(qmap__size__(object), QMAP_RDWORD) - where) >> QMAP_RDWORD_P2; i--;)

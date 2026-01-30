@@ -2,5 +2,4 @@
 // #define test_eq_8_precomp(v, px) (__test_zero_wi((v) ^ (px)))
 #include <stddef.h>
 #include <stdint.h>
-#include <stdio.h>
 #include <immintrin.h>

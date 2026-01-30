@@ -4,9 +4,10 @@
 #include <stdlib.h>
 #include <stddef.h>
 #include <error.h>
-#if defined(x86_64) || defined(__amd__)
+
+#if defined(__x86_64__) || defined(__i386__) || defined(__amd__)
 #include <immintrin.h>
-#elif defined(__arm__) || defined(__ARM_ARCH) && __ARM_ARCH >= 7
+#elif defined(__aarch64__) || defined(__arm__) || defined(__ARM_ARCH) && __ARM_ARCH >= 7
 #include <arm_neon.h>
 #ifndef __ARM_NEON
 #define __ARM_NEON 1

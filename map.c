@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <stddef.h>
 #include <error.h>
+#include "./macro.h"
 #if defined(__x86_64__) || defined(__i386__) || defined(__amd__)
 #include <immintrin.h>
 #elif defined(__aarch64__) || defined(__arm__) || defined(__ARM_ARCH) && __ARM_ARCH >= 7
@@ -153,13 +154,13 @@ extern __inline__ __attribute__((always_inline, pure)) uint64_t qmap_b64_testeq(
 #error UNIMPLEMENTED
 #endif
 
-#define qmap__cache__(map, at) (&((map)->__cache))[at]
-#define qmap__data__(map, at) (&((map)->__data))[at]
-#define qmap__ctrl_switch__(map, at) (&((map)->__ctrl_switch))[at]
-#define qmap__capacity__(map) ((map)->__capacity)
-#define qmap__group_size__(map) ((map)->__group_size)
-#define qmap__size__(map) ((map)->__size)
-#define qmap__load_factor__(map) ((map)->__load_factor)
+#define qmap__cache__(map, ...)       (&((map)->__cache))[QMAP_AN_INDEX_IF_NOT_EMPTY(0, __VA_ARGS__)]
+#define qmap__data__(map, ...)        (&((map)->__data))[QMAP_AN_INDEX_IF_NOT_EMPTY(0, __VA_ARGS__)]
+#define qmap__ctrl_switch__(map, ...) (&((map)->__ctrl_switch))[QMAP_AN_INDEX_IF_NOT_EMPTY(0, __VA_ARGS__)]
+#define qmap__capacity__(map)         ((map)->__capacity)
+#define qmap__group_size__(map)       ((map)->__group_size)
+#define qmap__size__(map)             ((map)->__size)
+#define qmap__load_factor__(map)      ((map)->__load_factor)
 static __inline__ __attribute__((always_inline)) void qmap__set_structure__(__qmap_base__ *map, size_t i, void *k, void *v, uint32_t h)
 {
 	qmap_kwvhpair_t _map_d = qmap__data__(map, i);
@@ -238,9 +239,8 @@ __attribute__((nonnull)) void *qmap_reserve__(__qmap_base__ *object, size_t size
 		return NULL;
 	}
 	capsize = qmap_rndmul_up(size, QMAP_RDWORD);
-	qmap__cache__(object, 0) = qmap_calloc(1, capsize + (capsize >> 6));
-	qmap__ctrl_switch__(object, 0) = (uint8_t *)qmap__cache__(object, capsize);
-	qmap__data__(object, 0) = qmap_calloc(capsize, sizeof(__qmap_kwvh__));
+	qmap__cache__(object) = qmap_calloc(1, capsize + (capsize >> 6));
+	qmap__data__(object) = qmap_calloc(capsize, sizeof(__qmap_kwvh__));
 	qmap__capacity__(object) = capsize;
 	qmap__load_factor__(object) = (capsize * 0.875) + 0.5;
 }

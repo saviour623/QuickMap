@@ -20,16 +20,17 @@
 
 typedef struct __qmap_base__ __qmap_base__, *qmap_unordered_map_t;
 typedef struct __qmap_kwvh__ __qmap_kwvh__, *qmap_kwvhpair_t;
-static uint8_t qmap_cached_index(const uint16_t);
+static uint8_t qmap_hashbyte(const uint16_t);
 
 struct __qmap_base__
 {
-	void        *__ctrl_switch;
-	uint8_t     *__cache;
+	void *__ctrl_switch;
+	uint8_t *__cache;
 	qmap_kwvhpair_t __data;
-	size_t   __capacity;
-	size_t   __size;
-	size_t   __load_factor;
+	size_t __capacity;
+	size_t __group_size;
+	size_t __size;
+	size_t __load_factor;
 	uint16_t __rehash_size;
 } __attribute__((aligned(64)));
 
@@ -41,18 +42,22 @@ struct __qmap_kwvh__
 #endif
 };
 
-typedef struct {
+typedef struct
+{
 	uintmax_t (*__hash_func)(void *key, size_t key_len, uint16_t seed);
-	void *    (*__new)(size_t n, size_t size);
-	void      (*__delete)(void *ptr);
-	void      (*__kwvh_delete)(void *ptr);
-	uint16_t   *__seed;
+	void *(*__new)(size_t n, size_t size);
+	void (*__delete)(void *ptr);
+	void (*__kwvh_delete)(void *ptr);
+	uint16_t *__seed;
 } qmap_policy_t;
 
 #define qmap_prefetch(adr, ...) __builtin_prefetch(adr, __VA_ARGS__)
 #define qmap_expect(cond, exp_val) __builtin_expect(cond, exp_val)
 #define QMAP_UNUSED __attribute__((unused))
 #define QMAP_DEFAULT_SIZE 32
+#define QMAP_SENTINEL 0x7f
+#define QMAP_EMPTY 0
+#define QMAP_DELETED 0x80
 #define QMAP_NULL 0
 
 #if QMAP_INCLUDE_HASH
@@ -91,9 +96,10 @@ typedef uint32_t mask_t;
 #define QMAP_RDWORD 32
 #define QMAP_RDWORD_P2 5
 #define QMAP_MASK_SHFT 0
+#define qmap_mm_load__(v) _mm_load_si128((const __m256i *)(v))
 #define qmap_mm_broadcast_byte__(x) _mm256_set1_epi8((uint8_t)(x))
 #define qmap_mm_set_zero__() _mm256_setzero_si256()
-#define qmap_mm_test_eq__(v, x) _mm256_movemask_epi8(_mm256_cmpeq_epi8(_mm256_loadu_si128((const __m256i *)(v)), (x)))
+#define qmap_mm_test_eq__(v, x) _mm256_movemask_epi8(_mm256_cmpeq_epi8((v), (x)))
 
 #elif defined(__SSE2__)
 typedef __m128i intx8_t;
@@ -101,13 +107,17 @@ typedef uint16_t mask_t;
 #define QMAP_RDWORD 16
 #define QMAP_RDWORD_P2 4
 #define QMAP_MASK_SHFT 0
+#define qmap_mm_load__(v) _mm_load_si128((const __m128i *)(v))
 #define qmap_mm_broadcast_byte__(x) _mm_set1_epi8((uint8_t)(x))
 #define qmap_mm_set_zero__() _mm_setzero_si128();
-#define qmap_mm_test_eq__(v, x) _mm_movemask_epi8(_mm_cmpeq_epi8(_mm_load_si128((const __m128i *)(v)), (x)))
+#define qmap_mm_set_sentinel__() _mm_set1_epi8((uint8_t)QMAP_SENTINEL)
+#define qmap_mm_test_eq__(v, x) _mm_movemask_epi8(_mm_cmpeq_epi8((v), (x)))
+extern inline __attribute__((always_inline)) uint16_t qmap_mm_test_empty__(const __m128i v, const __m128i z) { return _mm_movemask_epi8(_mm_cmpeq_epi8(v, z)); }
+extern inline __attribute__((always_inline)) uint16_t qmap_mm_test_emptydel__(const __m128i v, const __m128i m, const __m128i z) { return _mm_movemask_epi8(_mm_cmpeq_epi8(_mm_and_si128(v, m), z)); }
 
 #elif defined(__ARM_NEON)
 typedef uint8x8_t intx8_t;
-typedef uint64_t  mask_t;
+typedef uint64_t mask_t;
 #define QMAP_RDWORD 8
 #define QMAP_RDWORD_P2 3
 #define QMAP_MASK_SHFT 3
@@ -116,9 +126,11 @@ extern __inline__ __attribute__((always_inline, pure)) uint64_t qmap_neon_testeq
 {
 	return vget_lane_u64(vreinterpret_u64_u8(vceq_u8(fv, mask)), 0) & 0x8080808080808080;
 }
+
+#define qmap_mm_load__(v) vld1_u8(v)
 #define qmap_mm_broadcast_byte__(x) vdup_n_u8((uint8_t)(x))
 #define qmap_mm_set_zero__() qmap_mm_broadcast_byte__(0)
-#define qmap_mm_test_eq__(v, x) qmap_neon_testeq(vld1_u8(v), x)
+#define qmap_mm_test_eq__(v, x) qmap_neon_testeq(v, x)
 
 #elif defined(__UINT64__)
 typedef uint64_t intx8_t, mask_t;
@@ -133,7 +145,7 @@ extern __inline__ __attribute__((always_inline, pure)) uint64_t qmap_b64_testeq(
 	fv ^= mask;
 	return test_zero_wi(fv);
 }
-
+#define qmap_mm_load__(v) (*(uint64_t *)(v))
 #define qmap_mm_broadcast_byte__(x) ((x) * 0x101010101010101ull)
 #define qmap_mm_test_eq__(v, x) qmap_b64_testeq(*(uint64_t *)(v), x)
 #define qmap_mm_set_zero__() 0
@@ -141,12 +153,13 @@ extern __inline__ __attribute__((always_inline, pure)) uint64_t qmap_b64_testeq(
 #error UNIMPLEMENTED
 #endif
 
-#define qmap__cache__(map_object, at) (&((map_object)->__cache))[at]
-#define qmap__data__(map_object, at)        (&((map_object)->__data))[at]
-#define qmap__ctrl_switch__(map_object, at) (&((map_object)->__ctrl_switch))[at]
-#define qmap__capacity__(map_object)        ((map_object)->__capacity)
-#define qmap__size__(map_object)            ((map_object)->__size)
-#define qmap__load_factor__(map_object)     ((map_object)->__load_factor)
+#define qmap__cache__(map, at) (&((map)->__cache))[at]
+#define qmap__data__(map, at) (&((map)->__data))[at]
+#define qmap__ctrl_switch__(map, at) (&((map)->__ctrl_switch))[at]
+#define qmap__capacity__(map) ((map)->__capacity)
+#define qmap__group_size__(map) ((map)->__group_size)
+#define qmap__size__(map) ((map)->__size)
+#define qmap__load_factor__(map) ((map)->__load_factor)
 static __inline__ __attribute__((always_inline)) void qmap__set_structure__(__qmap_base__ *map, size_t i, void *k, void *v, uint32_t h)
 {
 	qmap_kwvhpair_t _map_d = qmap__data__(map, i);
@@ -155,7 +168,7 @@ static __inline__ __attribute__((always_inline)) void qmap__set_structure__(__qm
 #ifdef QMAP_INCLUDE_HASH
 	_map_d->__hash = h;
 #endif
-	qmap__cache__(map, i)[0] = qmap_cached_index(h & 0xffffu);
+	qmap__cache__(map, i)[0] = qmap_hashbyte(h & 0xffffu);
 	qmap__size__(map) += 1;
 }
 
@@ -172,13 +185,14 @@ static __inline__ __attribute__((always_inline)) void qmap__set_structure__(__qm
 		++(cache_array);                        \
 	} while (0)
 
-#define qmap_get_unused(map_object, at) qmap_get_unused__(qmap__cache__(map_object, 0), qmap__size__(map_object), at)
-#define qmap_empty_object(map_object) (qmap__capacity__(map_object) == 0)
-#define qmap_ctrl_is_empty(map_object, at) (qmap__cache__(map_object, at)[0] == QMAP_NULL)
+#define qmap_get_unused(map, at) qmap_get_unused__(qmap__cache__(map, 0), qmap__size__(map), at)
+#define qmap_empty_object(map) (qmap__capacity__(map) == 0)
+#define qmap_ctrl_is_empty(map, at) (qmap__cache__(map, at)[0] == QMAP_NULL)
+#define qmap_group_index_from(i) qmap_rndmul_down(i, QMAP_RDWORD_P2)
 
-extern __inline__ __attribute__((always_inline, pure)) uint8_t qmap_cached_index(const uint16_t hash)
+extern __inline__ __attribute__((always_inline, pure)) uint8_t qmap_hashbyte(const uint16_t hash)
 {
-	return (hash - ((hash * 0xff01u) >> 24)) + 1;
+	return (hash - ((hash * 0x205u) >> 16)) + 1;
 }
 
 static __inline__ __attribute__((always_inline, pure)) uint32_t qmap_compute_hash(const uint8_t *key, const int len)
@@ -199,10 +213,10 @@ static void *qmap_calloc(size_t n, size_t size)
 	void *ptr = calloc(n, size);
 
 	if (ptr == NULL)
-		{
-			perror("qmap internal error");
-			exit(EXIT_FAILURE);
-		}
+	{
+		perror("qmap internal error");
+		exit(EXIT_FAILURE);
+	}
 	return ptr;
 }
 
@@ -212,7 +226,7 @@ __attribute__((noinline)) static __qmap_base__ *qmap_init__(void)
 	return object;
 }
 
-__attribute__((nonnull)) void qmap_reserve__(__qmap_base__ *object, size_t size)
+__attribute__((nonnull)) void *qmap_reserve__(__qmap_base__ *object, size_t size)
 {
 	size_t capsize;
 
@@ -221,14 +235,14 @@ __attribute__((nonnull)) void qmap_reserve__(__qmap_base__ *object, size_t size)
 	if (qmap__capacity__(object) != 0)
 	{
 		// TODO: if object is nonempty and reserve required a size > capacity, resize and rehash object else do nothing
-		return;
+		return NULL;
 	}
 	capsize = qmap_rndmul_up(size, QMAP_RDWORD);
 	qmap__cache__(object, 0) = qmap_calloc(1, capsize + (capsize >> 6));
 	qmap__ctrl_switch__(object, 0) = (uint8_t *)qmap__cache__(object, capsize);
-	qmap__data__(object, 0)        = qmap_calloc(capsize, sizeof(__qmap_kwvh__));
-	qmap__capacity__(object)       = capsize;
-	qmap__load_factor__(object)    = (capsize * 0.875) + 0.5;
+	qmap__data__(object, 0) = qmap_calloc(capsize, sizeof(__qmap_kwvh__));
+	qmap__capacity__(object) = capsize;
+	qmap__load_factor__(object) = (capsize * 0.875) + 0.5;
 }
 
 /*
@@ -236,79 +250,92 @@ __attribute__((nonnull)) void qmap_reserve__(__qmap_base__ *object, size_t size)
  */
 static __attribute__((nonnull)) size_t qmap_find__(const struct __qmap_base__ *object, const void *key, const size_t key_len)
 {
-	intx8_t *cache_group_ry = NULL;
-	qmap_kwvhpair_t data_group_ry, group QMAP_UNUSED;
-	mask_t   mask  = 0;
-	uint32_t hash  = qmap_compute_hash(key, key_len);
-	size_t   where = (hash & (qmap__capacity__(object) - 1));
-	_Alignas(QMAP_RDWORD) const intx8_t mulx8_hash = qmap_mm_broadcast_byte__(qmap_cached_index(hash & 0xffffu));
+	intx8_t *cache_array = NULL;
+	qmap_kwvhpair_t items, group QMAP_UNUSED;
+	mask_t mask = 0;
+	uint32_t hash = qmap_compute_hash(key, key_len);
+	size_t idx = (hash & (qmap__capacity__(object) - 1));
+	_Alignas(QMAP_RDWORD) const intx8_t mulx8_hash = qmap_mm_broadcast_byte__(qmap_hashbyte(hash & 0xffffu));
+	_Alignas(QMAP_RDWORD) const intx8_t mulx8_zero = qmap_mm_set_zero__();
+	intx8_t group_ctrl QMAP_UNUSED;
 
-	where = qmap_rndmul_down(where, QMAP_RDWORD_P2);
-	cache_group_ry = qmap__cache__(object, where); // read some bytes from cache array before actual index
-	data_group_ry  = qmap__data__(object, where);
+	idx = qmap_group_index_from(idx);
+	items = qmap__data__(object, idx);
+	cache_array = qmap__cache__(object, idx);
+	;
 
-	qmap_prefetch(cache_group_ry, 0, 3);
-	for (uint32_t i = (qmap_rndmul_up(qmap__size__(object), QMAP_RDWORD) - where) >> QMAP_RDWORD_P2; i--;)
+	// group = data_group + idx;
+	qmap_prefetch(cache_array, 0, 3);
+	do
 	{
-		mask = qmap_mm_test_eq__(cache_group_ry, mulx8_hash);
+		group_ctrl = qmap_mm_load__(cache_array);
+		mask = qmap_mm_test_eq__(group_ctrl, mulx8_hash);
 		while (qmap_expect(mask, 0))
 		{
-			where = qmap_scan_reverse(mask) >> QMAP_MASK_SHFT;
-			group = data_group_ry+where;
-			if (qmap_compare_hash(group->__hash, hash) && qmap_cmp_str_eq(group->__key, key, key_len))
-				return where;
+			idx = qmap_scan_reverse(mask) >> QMAP_MASK_SHFT;
+			if (qmap_compare_hash(group[idx].__hash, hash) && qmap_cmp_str_eq(group[idx].__key, key, key_len))
+				return idx;
 			mask &= mask - 1;
 		}
-		qmap_read_next_group(cache_group_ry, data_group_ry);
-	}
+		qmap_read_next_group(cache_array, items);
+	} while (qmap_mm_test_empty__(group_ctrl, mulx8_zero));
+
 	return 0;
 }
 
-static int qmap_get_unused__(const void *cache_array, size_t size, uint32_t *from)
+static __attribute__((nonnull)) int qmap_insert__(struct __qmap_base__ *object, void *key, void *value)
 {
-	size_t index = qmap_rndmul_down(*from, QMAP_RDWORD_P2);
-	mask_t mask = 0;
-	intx8_t *cache_group_ry =  (intx8_t *)(cache_array + index);
-	_Alignas(QMAP_RDWORD) const intx8_t mulx8_zero = qmap_mm_set_zero__();
 
-	for (size_t i = 0, e = (qmap_rndmul_up(size, QMAP_RDWORD) - index) >> 6; i < e; i++)
-	{
-		mask = qmap_mm_test_eq__(cache_group_ry, mulx8_zero);
-		if (qmap_expect(mask, 1))
-			return (*from = (i << QMAP_RDWORD_P2) | qmap_scan_reverse(mask));
-		qmap_read_next_cache_group(cache_array);
-	}
-	return -1;
-}
-
-static __attribute__((nonnull)) void qmap_add__(struct __qmap_base__ *object, void *key, void *value)
-{
-	void *ctrl_switch;
-	uint32_t where QMAP_UNUSED, hash QMAP_UNUSED;
-
-	if (qmap_empty_object(object))
-		qmap_reserve__(object, QMAP_DEFAULT_SIZE);
+	if (qmap_expect(qmap_empty_object(object) && qmap_reserve__(object, QMAP_DEFAULT_SIZE) == NULL, 0))
+		return -1;
 
 	if (qmap_expect(qmap__size__(object) > qmap__load_factor__(object), 0))
-		goto rehash;
-
-	hash  = qmap_compute_hash(key, strlen(key));
-	where = hash & (qmap__size__(object) - 1);
-
-	if (!qmap_ctrl_is_empty(object, where) && qmap_get_unused(object, &where) < 0)
 	{
-	rehash:
-		// resize object
-		return;
+		// rehash
 	}
-	qmap__set_structure__(object, where, key, value, hash);
+
+	{
+		mask_t mask = 0, maskempt = 0;
+		const uint32_t hash = qmap_compute_hash(key, strlen(key));
+		size_t idx = hash & (qmap__group_size__(object) - 1), empty_idx QMAP_UNUSED;
+		intx8_t *cache_array = (intx8_t *)(qmap__cache__(object, qmap_group_index_from(idx)));
+		_Alignas(QMAP_RDWORD) const intx8_t mulx8_hash = qmap_mm_broadcast_byte__(qmap_hashbyte(hash & 0xffffu));
+		_Alignas(QMAP_RDWORD) const intx8_t mulx8_del = qmap_mm_set_sentinel__();
+		_Alignas(QMAP_RDWORD) const intx8_t mulx8_zero = qmap_mm_set_zero__();
+
+		for (size_t skip = 0; skip < qmap__group_size__(object) >> QMAP_RDWORD_P2;)
+		{
+			intx8_t group_ctrl = qmap_mm_load__(cache_array);
+			mask = qmap_mm_test_eq__(group_ctrl, mulx8_hash);
+
+			while (mask)
+			{
+				idx = qmap_scan_reverse(mask) >> QMAP_MASK_SHFT;
+				// if (qmap_compare_hash(group[idx].__hash, hash) && qmap_cmp_str_eq(group[idx].__key, key, key_len))
+				mask &= mask - 1;
+			}
+
+			if (qmap_expect(empty_idx == 0 && (mask = qmap_mm_test_emptydel__(group_ctrl, mulx8_del, mulx8_zero)), 0))
+			{
+				empty_idx = 0;
+			}
+
+			if (qmap_mm_test_empty__(group_ctrl, mulx8_zero))
+			{
+				//
+				qmap__set_structure__(object, idx, key, value, hash);
+			}
+
+			idx = (++skip + idx) & (qmap__group_size__(object) - 1);
+		}
+	}
 }
 
 static __attribute__((nonnull)) void qmap_remove__(struct __qmap_base__ *object, const void *__restrict key)
 {
-	uint32_t where;
+	uint32_t idx;
 
-	if ((where = qmap_find__(object, key, strlen(key))) < 0)
+	if ((idx = qmap_find__(object, key, strlen(key))) < 0)
 	{
 		// Error: No such element
 	}
@@ -323,3 +350,5 @@ __attribute__((noinline)) static struct __qmap_base__ *qmap_delete__(struct __qm
 {
 	return NULL;
 }
+
+// 0b00000001
